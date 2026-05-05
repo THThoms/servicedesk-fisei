@@ -5,6 +5,7 @@ const app = express();
 app.use(express.json());
 
 app.use('/api/auth', require('./auth/authRouter'));
+app.use('/api/servicios', require('./catalog/catalogRouter'));
 
 app.use((err, req, res, next) => {
   console.error(err);
