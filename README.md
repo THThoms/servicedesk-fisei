@@ -1,13 +1,12 @@
-# 🎫 ServiceDesk — Mesa de Ayuda HelpDesk
+# ServiceDesk — Mesa de Ayuda HelpDesk
 
-> Sistema de gestión de tickets de soporte técnico con enrutamiento automático por niveles, escalamiento, base de conocimiento y notificaciones por correo.
+> Sistema de gestión de tickets de soporte técnico con enrutamiento automático por niveles, escalamiento, base de conocimiento y notificaciones.
 
-**Universidad Técnica de Ambato · FISEI**  
-Metodología: SCRUM · 3 Sprints · 15 días · 2025
+**Universidad Técnica de Ambato · FISEI** | Metodología: SCRUM · 3 Sprints · 2025
 
 ---
 
-## 👥 Equipo
+## Equipo
 
 | Rol | Integrante | Responsabilidad principal |
 |---|---|---|
@@ -17,22 +16,23 @@ Metodología: SCRUM · 3 Sprints · 15 días · 2025
 
 ---
 
-## 📌 Descripción
+## Documentación principal
 
-El sistema centraliza la atención de soporte técnico institucional. Al crear un ticket, el **servicio seleccionado determina directamente el nivel técnico de entrada** — sin pasar obligatoriamente por todos los niveles. Si el nivel asignado no puede resolver el problema, el técnico lo escala al siguiente y queda registrado en el historial.
+Todo el detalle del proyecto se encuentra en el documento SCRUM:
 
-### Niveles de atención
+**[SCRUM_ServiceDesk_v2.docx](./SCRUM_ServiceDesk_v2.docx)**
 
-| Nivel | Técnicos | Servicios de entrada |
-|---|---|---|
-| N1 | Técnicos nuevos | Internet, Correo electrónico |
-| N2 | Técnico profesional | Equipos, Software |
-| N3 | Servidor DITIC | MOODLE, Servicio de calificaciones |
-| N4 | Proveedor externo | Fallo crítico de infraestructura |
+Contenido del documento:
+
+- Product Backlog completo (HU-01 a HU-13) con puntos de historia y responsables
+- Planificación de Sprint 1, 2 y 3 (objetivos, criterios de aceptación por HU)
+- Arquitectura del sistema y esquema de base de datos
+- Flujos de comunicacion entre servicios
+- Definicion de Hecho (DoD)
 
 ---
 
-## 🗂️ Estructura del Proyecto
+## Estructura del proyecto
 
 ```
 servicedesk-fisei/
@@ -47,14 +47,15 @@ servicedesk-fisei/
 │   └── schema.sql      # HU-01 · Scripts de base de datos
 ├── docs/               # Documentación del proyecto
 ├── tests/              # HU-13 · Pruebas de integración
-├── .gitignore
+├── docker-compose.yml
+├── .env.example
 ├── LICENSE
 └── README.md
 ```
 
 ---
 
-## 🚀 Ramas — Git Flow
+## Ramas — Git Flow
 
 | Rama | Propósito |
 |---|---|
@@ -66,10 +67,10 @@ servicedesk-fisei/
 
 ```bash
 # Iniciar una historia de usuario
-git flow feature start HU-05-enrutamiento
+git flow feature start HU-02-autenticacion-roles
 
 # Terminar y mergear a develop
-git flow feature finish HU-05-enrutamiento
+git flow feature finish HU-02-autenticacion-roles
 
 # Cerrar un sprint (merge a main + develop + tag)
 git flow release start sprint-1
@@ -78,56 +79,30 @@ git flow release finish sprint-1
 
 ---
 
-## 📅 Sprints
+## Cómo arrancar
 
-### Sprint 1 · Días 1–5
-**Objetivo:** Base del sistema — BD, usuarios, catálogo de servicios, formulario de ticket con enrutamiento automático.
+**Requisitos:** Docker, Docker Compose, Node.js 18+
 
-| HU | Historia | Responsable |
-|---|---|---|
-| HU-01 | BD + estructura del proyecto | Carla Paredes |
-| HU-02 | Gestión de usuarios y roles | Tomas Solis |
-| HU-03 | Catálogo de servicios + reglas de nivel | Manolo Garcia |
-| HU-04 | Formulario de ticket (combobox + img) | Carla Paredes |
-| HU-05 | Motor de enrutamiento directo al nivel | Tomas Solis |
+```bash
+# 1. Clonar el repositorio
+git clone <url-del-repo>
+cd servicedesk-fisei
 
-### Sprint 2 · Días 6–10
-**Objetivo:** Gestión completa de tickets — paneles por nivel, escalamiento, historial, base de conocimiento.
+# 2. Configurar variables de entorno
+cp .env.example .env
 
-| HU | Historia | Responsable |
-|---|---|---|
-| HU-06 | Panel de bandeja por nivel (N1–N4) | Manolo Garcia |
-| HU-07 | Acción: resolver o escalar ticket | Tomas Solis |
-| HU-08 | Historial de acciones por nivel | Carla Paredes |
-| HU-09 | Consulta de base de conocimiento | Manolo Garcia |
+# 3. Levantar la base de datos
+docker-compose up -d db
 
-### Sprint 3 · Días 11–15
-**Objetivo:** Cierre del ciclo — cierre de ticket, notificación al usuario, panel admin y pruebas finales.
-
-| HU | Historia | Responsable |
-|---|---|---|
-| HU-10 | Cierre de ticket + llenado de base de conocimiento | Tomas Solis |
-| HU-11 | Notificación por correo al usuario (SMTP) | Manolo Garcia |
-| HU-12 | Panel de administración general | Carla Paredes |
-| HU-13 | Pruebas de integración y correcciones finales | Carla Paredes |
+# 4. Instalar dependencias y arrancar la app
+npm install
+npm run dev
+```
 
 ---
 
-## ✅ Definición de Hecho (DoD)
+## Licencia
 
-Una historia de usuario se considera completa cuando:
-
-- [ ] El código fue revisado por al menos un compañero (PR aprobado)
-- [ ] Cumple los criterios de aceptación definidos en el Sprint Planning
-- [ ] Se ejecutaron pruebas unitarias sin errores críticos
-- [ ] El módulo fue demostrado y aprobado en el Sprint Review
-- [ ] El código está integrado a `develop` sin conflictos
-
----
-
-## 📄 Licencia
-
-Este proyecto está protegido bajo una **licencia propietaria con permiso de evaluación académica**.  
-Se permite la revisión y calificación por parte de docentes de UTA-FISEI.  
-Cualquier otro uso requiere autorización escrita de los autores.  
+Licencia propietaria con permiso de evaluación académica.
+Se permite la revisión y calificación por docentes de UTA-FISEI.
 Ver [`LICENSE`](./LICENSE) para más detalles.
