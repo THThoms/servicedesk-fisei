@@ -4,6 +4,8 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
+app.use('/api/auth', require('./auth/authRouter'));
+
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'Error interno del servidor' });
