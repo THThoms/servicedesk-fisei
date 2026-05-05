@@ -8,6 +8,7 @@ app.use(express.json());
 app.use('/api/auth', require('./auth/authRouter'));
 app.use('/api/servicios', require('./catalog/catalogRouter'));
 app.use('/api/tickets', require('./tickets/ticketRouter'));
+app.use('/api/enrutamiento', require('./routing/routingRouter'));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 app.use((err, req, res, next) => {

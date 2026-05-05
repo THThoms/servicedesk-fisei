@@ -1,4 +1,5 @@
 const db = require('../db');
+const { resolverNivel } = require('../routing/routingService');
 
 async function crearTicket(req, res) {
   try {
@@ -6,14 +7,12 @@ async function crearTicket(req, res) {
     if (!servicio_id || !titulo || !descripcion)
       return res.status(400).json({ error: 'servicio_id, titulo y descripcion son requeridos' });
 
-    const regla = await db.query(
-      'SELECT nivel_entrada FROM reglas_enrutamiento WHERE servicio_id=$1',
-      [servicio_id]
-    );
-    if (!regla.rows.length)
+    let nivel;
+    try {
+      nivel = await resolverNivel(servicio_id);
+    } catch {
       return res.status(400).json({ error: 'El servicio seleccionado no tiene regla de enrutamiento' });
-
-    const nivel = regla.rows[0].nivel_entrada;
+    }
     const ticket = await db.query(
       'INSERT INTO tickets (usuario_id, servicio_id, titulo, descripcion, nivel_actual) VALUES ($1,$2,$3,$4,$5) RETURNING *',
       [req.usuario.id, servicio_id, titulo, descripcion, nivel]
