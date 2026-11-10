@@ -117,6 +117,17 @@ echo "  ✔ sin auditorías, pruebas, cuentas demo, IP públicas ni cuentas real
 pg="$(grep -rIniE --exclude=build-server-package.sh 'postgres|5432|pg_dump' "$STAGE/deploy" "$STAGE/scripts" | grep -viE '^[^:]+:[0-9]+:\s*#|PostgreSQL (fue|está) retirado|no (usa|requiere|instala) PostgreSQL|sin PostgreSQL|PostgreSQL retirado' || true)"
 [ -z "$pg" ] || { echo "✘ Referencias de runtime a PostgreSQL:"; echo "$pg"; exit 1; }
 echo "  ✔ deploy/ y scripts/ sin dependencias de PostgreSQL"
+
+# Fin de línea: lo que se ejecuta o se lee en Linux debe ir con LF. Un paquete
+# generado desde una copia de Windows con core.autocrlf=true llevaría CRLF (bash\r).
+# Se cuenta el CR con tr y su código octal: un CR escrito en el script se pierde
+# dentro de $( ) en Git Bash y el patrón quedaría vacío.
+crlf="$(cd "$STAGE" && find . -type f \( -name '*.sh' -o -name '*.mjs' -o -name '*.sql' -o -name 'Dockerfile*' \
+        -o -name '.env.example' -o -path './deploy/*' -o -path './scripts/*' \) ! -name '*.bat' ! -name '*.cmd' -print |
+        while IFS= read -r f; do [ "$(tr -cd '\015' < "$f" | wc -c)" -eq 0 ] || echo "$f"; done)"
+[ -z "$crlf" ] || { echo "✘ Archivos con fin de línea de Windows (CRLF) en el paquete:"; echo "$crlf"
+                    echo "  Genera el paquete desde un clon con core.autocrlf=false."; exit 1; }
+echo "  ✔ scripts y configuración del servidor con fin de línea LF"
 chmod +x "$STAGE"/scripts/*.sh "$STAGE"/scripts/*/*.sh "$STAGE"/deploy/server/mssql-init/init.sh 2>/dev/null || true
 
 echo "==> Manifest"

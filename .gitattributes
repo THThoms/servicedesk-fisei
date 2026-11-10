@@ -1,0 +1,14 @@
+# Finales de línea. El repositorio guarda LF y todo se extrae con LF, también en
+# Windows, para que el paquete del servidor sea el mismo en cualquier equipo y no
+# lleve CRLF (bash\r falla en Linux). Los editores de Windows trabajan con LF.
+* text=auto eol=lf
+# Scripts de Windows.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Binarios.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.jar binary
