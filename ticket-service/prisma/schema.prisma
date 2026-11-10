@@ -1,0 +1,217 @@
+// =============================================================================
+// ticket-service - Schema Prisma para LABORATORIO SQL Server 2022 (Fase B).
+// Copia paralela de schema.prisma. NO reemplaza al schema de producción.
+//
+// Diferencias respecto a PostgreSQL:
+//   · provider="sqlserver"
+//   · @db.Uuid  -> @db.UniqueIdentifier
+//   · @db.Text  -> @db.NVarChar(Max)
+//   · DeviceToken.token @unique @db.NVarChar(512)  (tokens FCM ~150 chars,
+//                                                    512 deja margen; unique
+//                                                    exige tamaño finito)
+//   · @db.VarChar(255) sobrevive tal cual (Prisma-sqlserver lo respeta).
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// Sprint B: sin enums (limitación Prisma-SQLServer). Valores en
+// `ticket-service/src/domain/enums.ts`.
+//   TicketStatus:     abierto|en_proceso|escalado|resuelto|cerrado (NVarChar(16))
+//   Level:            N1|N2|N3|N4                                  (NVarChar(4))
+//   Priority:         baja|media|alta|critica                      (NVarChar(16))
+//   ResponsibleArea:  TECHNICIANS|DTIC                              (NVarChar(16))
+//   AssignmentStatus: unassigned|available|accepted|assigned_by_admin (NVarChar(24))
+
+model Ticket {
+  id                     String           @id @default(uuid()) @db.UniqueIdentifier
+  number                 String           @unique
+  userId                 String           @map("user_id") @db.UniqueIdentifier
+  userName               String?          @map("user_name")
+  userEmail              String?          @map("user_email")
+  serviceId              String           @map("service_id") @db.UniqueIdentifier
+  serviceName            String?          @map("service_name")
+  detail                 String   @db.NVarChar(Max)
+  location               String?  @db.VarChar(255)
+  status                 String   @default("abierto") @db.NVarChar(24)
+  priority               String   @default("media") @db.NVarChar(16)
+  responsibleArea        String   @default("TECHNICIANS") @db.NVarChar(16) @map("responsible_area")
+  assignmentStatus       String   @default("available") @db.NVarChar(24) @map("assignment_status")
+  assignedTechnicianId   String?          @map("assigned_technician_id") @db.UniqueIdentifier
+  assignedTechnicianName String?          @map("assigned_technician_name")
+  acceptedAt             DateTime?        @map("accepted_at")
+  resolvedAt             DateTime?        @map("resolved_at")
+  resolvedById           String?          @map("resolved_by_id") @db.UniqueIdentifier
+  resolvedByName         String?          @map("resolved_by_name")
+  knowledgeArticleId     String?          @map("knowledge_article_id") @db.UniqueIdentifier
+  resolutionSummary      String?          @map("resolution_summary") @db.NVarChar(Max)
+  levelAssigned          String   @db.NVarChar(4) @map("level_assigned")
+  createdAt              DateTime         @default(now()) @map("created_at")
+  updatedAt              DateTime         @updatedAt @map("updated_at")
+
+  attachments Attachment[]
+  events      TicketEvent[]
+  acceptances SolutionAcceptance[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([responsibleArea])
+  @@index([assignmentStatus])
+  @@index([assignedTechnicianId])
+  @@map("tickets")
+}
+
+// Sprint B: EventAction / EventVisibility como String (ver src/domain/enums.ts).
+//   EventAction:     CREATED..CLOSED         (NVarChar(24))
+//   EventVisibility: public | internal       (NVarChar(16))
+
+model TicketEvent {
+  id                   String   @id @default(uuid()) @db.UniqueIdentifier
+  ticketId             String   @map("ticket_id") @db.UniqueIdentifier
+  action               String   @db.NVarChar(24)
+  title                String?
+  previousLevel        String?  @db.NVarChar(4) @map("previous_level")
+  newLevel             String?  @db.NVarChar(4) @map("new_level")
+  previousStatus       String?  @db.NVarChar(24) @map("previous_status")
+  newStatus            String?  @db.NVarChar(24) @map("new_status")
+  previousArea         String?  @db.NVarChar(16) @map("previous_area")
+  newArea              String?  @db.NVarChar(16) @map("new_area")
+  previousTechnicianId String?  @map("previous_technician_id") @db.UniqueIdentifier
+  newTechnicianId      String?  @map("new_technician_id") @db.UniqueIdentifier
+  reason               String?  @db.NVarChar(Max)
+  workDone             String?  @map("work_done") @db.NVarChar(Max)
+  description          String?  @db.NVarChar(Max)
+  visibility           String   @default("public") @db.NVarChar(16)
+  performedBy          String           @map("performed_by") @db.UniqueIdentifier
+  performedByName      String           @map("performed_by_name")
+  createdAt            DateTime         @default(now()) @map("created_at")
+
+  // onUpdate: NoAction para evitar el error de SQL Server sobre "múltiples
+  // cascadas" cuando el modelo ya tiene onDelete Cascade a la misma tabla.
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([ticketId])
+  @@index([createdAt])
+  @@map("ticket_events")
+}
+
+// Sprint B: EmailStatus como String (ver src/domain/enums.ts).
+//   EmailStatus: pending | sent | failed  (NVarChar(16))
+
+model EmailOutbox {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  ticketId  String?  @map("ticket_id") @db.UniqueIdentifier
+  to        String
+  subject   String
+  htmlBody  String   @map("html_body") @db.NVarChar(Max)
+  textBody  String?  @map("text_body") @db.NVarChar(Max)
+  eventType String   @map("event_type")
+  status    String   @default("pending") @db.NVarChar(16)
+  attempts  Int         @default(0)
+  lastError String?     @map("last_error") @db.NVarChar(Max)
+  sentAt    DateTime?   @map("sent_at")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([ticketId])
+  @@index([createdAt])
+  @@map("email_outbox")
+}
+
+model DeviceToken {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  userId     String   @map("user_id") @db.UniqueIdentifier
+  // 512 chars alcanza para tokens FCM (~150-200) y deja margen; unique exige
+  // tamaño finito en SQL Server.
+  token      String   @unique @db.NVarChar(512)
+  platform   String
+  deviceId   String?  @map("device_id")
+  appVersion String?  @map("app_version")
+  isActive   Boolean  @default(true) @map("is_active")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([userId, isActive])
+  @@index([lastSeenAt])
+  @@map("device_tokens")
+}
+
+model Attachment {
+  id              String   @id @default(uuid()) @db.UniqueIdentifier
+  ticketId        String   @map("ticket_id") @db.UniqueIdentifier
+  filePath        String?  @map("file_path")
+  imageUrl        String?  @map("image_url")
+  storageProvider String   @default("local") @map("storage_provider")
+  fileSize        Int      @map("file_size")
+  mimeType        String   @map("mime_type")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([ticketId])
+  @@map("attachments")
+}
+
+// =============================================================================
+// Fase T — Aceptación digital de la solución por el usuario solicitante.
+//
+// AcceptanceTerms: texto de los términos por VERSIÓN. Una versión publicada no
+// cambia nunca (su SHA-256 queda registrado en cada decisión); un texto nuevo
+// exige una versión nueva. SolutionAcceptance: una fila por DECISIÓN (aceptar o
+// rechazar), con instantánea de quién, cuándo, qué solución y qué términos.
+// Ninguna se actualiza ni se borra (trigger INSTEAD OF UPDATE/DELETE creado al
+// arrancar ticket-service). Constancia de aceptación digital, NO firma
+// electrónica certificada.
+// =============================================================================
+model AcceptanceTerms {
+  version     String   @id @db.NVarChar(16)
+  title       String   @db.NVarChar(200)
+  text        String   @db.NVarChar(Max)
+  sha256      String   @db.NVarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  acceptances SolutionAcceptance[]
+
+  @@map("acceptance_terms")
+}
+
+model SolutionAcceptance {
+  id              String   @id @default(uuid()) @db.UniqueIdentifier
+  // Código legible y único de la constancia (p. ej. VD-20261105-3F9A1C2B).
+  code            String   @unique @db.NVarChar(32)
+  ticketId        String   @map("ticket_id") @db.UniqueIdentifier
+  // ACCEPTED | REJECTED
+  decision        String   @db.NVarChar(16)
+  userId          String   @map("user_id") @db.UniqueIdentifier
+  userName        String   @map("user_name") @db.NVarChar(200)
+  userEmail       String   @map("user_email") @db.NVarChar(320)
+  userRole        String   @map("user_role") @db.NVarChar(32)
+  decidedAt       DateTime @default(now()) @map("decided_at")
+  termsVersion    String   @map("terms_version") @db.NVarChar(16)
+  termsSha256     String   @map("terms_sha256") @db.NVarChar(64)
+  // Solución sobre la que se decide: el evento RESOLVED vigente y su instantánea.
+  solutionEventId String?  @map("solution_event_id") @db.UniqueIdentifier
+  solutionSummary String?  @map("solution_summary") @db.NVarChar(Max)
+  technicianId    String?  @map("technician_id") @db.UniqueIdentifier
+  technicianName  String?  @map("technician_name") @db.NVarChar(200)
+  // Motivo obligatorio cuando decision = REJECTED.
+  reason          String?  @db.NVarChar(Max)
+
+  ticket Ticket          @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  terms  AcceptanceTerms @relation(fields: [termsVersion], references: [version], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([ticketId])
+  @@index([decidedAt])
+  @@index([technicianId])
+  @@map("solution_acceptances")
+}
