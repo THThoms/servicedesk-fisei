@@ -1,0 +1,109 @@
+// =============================================================================
+// catalog-service - Schema Prisma para LABORATORIO SQL Server 2022 (Fase B).
+// Copia paralela de schema.prisma. NO reemplaza al schema de producción.
+//
+// Cambio de arquitectura crítico:
+//   · `keywords String[]` deja de existir; ahora es la tabla `KnowledgeKeyword`
+//     (relación 1:N con `KnowledgeArticle`). SQL Server no soporta arrays.
+//     Habitual convención Prisma: tabla puente con `articleId` + `keyword`.
+//
+// Diferencias respecto a PostgreSQL:
+//   · provider="sqlserver"
+//   · @db.Uuid  -> @db.UniqueIdentifier
+//   · @db.Text  -> @db.NVarChar(Max)
+//   · sin `String[]`
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// Sprint B: sin enums (limitación Prisma-SQLServer). Los valores viven en
+// `src/domain/enums.ts`. Rangos:
+//   Level:           N1 | N2 | N3 | N4                       (NVarChar(4))
+//   ResponsibleArea: TECHNICIANS | DTIC                      (NVarChar(16))
+//   Sprint 3+: TICS -> DTIC (renombrado). GENERAL eliminado.
+
+model Service {
+  id              String              @id @default(uuid()) @db.UniqueIdentifier
+  name            String              @unique
+  description     String?
+  levelEntry      String              @db.NVarChar(4) @map("level_entry")
+  responsibleArea String              @default("TECHNICIANS") @db.NVarChar(16) @map("responsible_area")
+  isActive        Boolean             @default(true) @map("is_active")
+  createdAt       DateTime            @default(now()) @map("created_at")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
+
+  routingRule       RoutingRule?
+  knowledgeArticles KnowledgeArticle[]
+
+  @@map("services")
+  @@index([isActive])
+}
+
+model RoutingRule {
+  id                String   @id @default(uuid()) @db.UniqueIdentifier
+  serviceId         String   @unique @map("service_id") @db.UniqueIdentifier
+  levelEntry        String    @db.NVarChar(4) @map("level_entry")
+  priorityHigh      String?   @db.NVarChar(4) @map("priority_high")
+  priorityCritical  String?   @db.NVarChar(4) @map("priority_critical")
+  isCritical        Boolean  @default(false) @map("is_critical")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  service           Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@map("routing_rules")
+}
+
+model Location {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  name      String   @unique
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("locations")
+  @@index([isActive])
+}
+
+// Sprint B - Refactor de `keywords`: tabla puente 1:N. Se guarda en lowercase
+// (misma normalización que la solución PostgreSQL original).
+model KnowledgeArticle {
+  id                 String   @id @default(uuid()) @db.UniqueIdentifier
+  title              String
+  problemDescription String   @db.NVarChar(Max) @map("problem_description")
+  solution           String   @db.NVarChar(Max)
+  serviceId          String?  @map("service_id") @db.UniqueIdentifier
+  createdByUserId    String?  @map("created_by_user_id") @db.UniqueIdentifier
+  isActive           Boolean  @default(true) @map("is_active")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  service            Service?           @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  keywords           KnowledgeKeyword[]
+
+  @@map("knowledge_articles")
+  @@index([isActive])
+  @@index([serviceId])
+  @@index([updatedAt])
+}
+
+// Sprint B - Tabla puente 1:N. Un artículo tiene N keywords normalizadas en
+// lowercase. `@@unique([articleId, keyword])` evita duplicados por artículo.
+model KnowledgeKeyword {
+  id          String           @id @default(uuid()) @db.UniqueIdentifier
+  articleId   String           @map("article_id") @db.UniqueIdentifier
+  keyword     String           @db.NVarChar(120)
+
+  article     KnowledgeArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@map("knowledge_keywords")
+  @@unique([articleId, keyword])
+  @@index([articleId])
+  @@index([keyword])
+}
