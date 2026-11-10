@@ -1,0 +1,233 @@
+version: "3.9"
+
+# =============================================================================
+# ⛔ LEGACY — NO EJECUTAR
+# Este compose usa PostgreSQL. PostgreSQL fue retirado del runtime en Fase N
+# (2026-09-15). Se conserva únicamente como archivo histórico para poder
+# reconstruir el entorno pre-cutover si se necesita leer los dumps custom
+# (ver /root/backups/postgresql-final-retired/… en el VPS y ./backups/…
+# en local). Para desarrollo o despliegue reales, usar:
+#   · docker-compose.mssql.yml       (dev local)
+#   · docker-compose.prod-mssql.yml  (producción)
+# =============================================================================
+
+# =============================================================================
+# ServiceDesk UTA - Sprint 1
+# Solo el api-gateway expone puerto al host.
+# Los demás servicios solo son accesibles dentro de la red `servicedesk-net`.
+# =============================================================================
+
+networks:
+  servicedesk-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  ticket-uploads:
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL - Una sola instancia, 3 bases aisladas con usuarios distintos
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: sd-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+      AUTH_DB_NAME: ${AUTH_DB_NAME}
+      AUTH_DB_USER: ${AUTH_DB_USER}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD}
+      CATALOG_DB_NAME: ${CATALOG_DB_NAME}
+      CATALOG_DB_USER: ${CATALOG_DB_USER}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD}
+      TICKET_DB_NAME: ${TICKET_DB_NAME}
+      TICKET_DB_USER: ${TICKET_DB_USER}
+      TICKET_DB_PASSWORD: ${TICKET_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-multi-db.sh:/docker-entrypoint-initdb.d/init-multi-db.sh:ro
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # auth-service (HU-01) - SSO Microsoft + JWT propio
+  # ---------------------------------------------------------------------------
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: sd-auth
+    restart: unless-stopped
+    # Deshabilitar IPv6 en el contenedor: el resolver Docker devuelve AAAA para
+    # login.microsoftonline.com pero no hay ruta IPv6 -> ENETUNREACH al hacer
+    # acquireTokenByCode. Con IPv6 off, getaddrinfo solo devuelve A records.
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --dns-result-order=ipv4first
+      PORT: 3001
+      DATABASE_URL: postgresql://${AUTH_DB_USER}:${AUTH_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${AUTH_DB_NAME}?schema=public
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET}
+      MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI}
+      ALLOWED_DOMAIN: ${ALLOWED_DOMAIN}
+      ADMIN_EMAILS: ${ADMIN_EMAILS}
+      AUTH_DEV_LOGIN: ${AUTH_DEV_LOGIN}
+      FRONTEND_URL: ${FRONTEND_URL}
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # catalog-service (HU-03) - Catálogo de servicios institucionales
+  # ---------------------------------------------------------------------------
+  catalog-service:
+    build:
+      context: ./catalog-service
+      dockerfile: Dockerfile
+    container_name: sd-catalog
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3002
+      DATABASE_URL: postgresql://${CATALOG_DB_USER}:${CATALOG_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${CATALOG_DB_NAME}?schema=public
+      JWT_SECRET: ${JWT_SECRET}
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # ticket-service (HU-04) - Creación y consulta de tickets
+  # ---------------------------------------------------------------------------
+  ticket-service:
+    build:
+      context: ./ticket-service
+      dockerfile: Dockerfile
+    container_name: sd-ticket
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3003
+      DATABASE_URL: postgresql://${TICKET_DB_USER}:${TICKET_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TICKET_DB_NAME}?schema=public
+      AUTH_DATABASE_URL: postgresql://${AUTH_DB_USER}:${AUTH_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${AUTH_DB_NAME}?schema=public
+      CATALOG_DATABASE_URL: postgresql://${CATALOG_DB_USER}:${CATALOG_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${CATALOG_DB_NAME}?schema=public
+      JWT_SECRET: ${JWT_SECRET}
+      CATALOG_SERVICE_URL: ${CATALOG_SERVICE_URL}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+      # HU-15 - Notificaciones por correo. Defaults seguros (modo log).
+      EMAIL_NOTIFICATIONS_ENABLED: ${EMAIL_NOTIFICATIONS_ENABLED:-true}
+      EMAIL_SEND_MODE: ${EMAIL_SEND_MODE:-log}
+      SMTP_FROM: ${SMTP_FROM:-ServiceDesk UTA <no-reply@uta.edu.ec>}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      # Sprint 3+ - Almacenamiento de imágenes (default local; cloudinary opcional).
+      STORAGE_MODE: ${STORAGE_MODE:-local}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      CLOUDINARY_FOLDER: ${CLOUDINARY_FOLDER:-servicedesk-uta}
+      # Sprint 4+ · Push notifications a la app Android (Firebase Cloud Messaging).
+      FCM_MODE: ${FCM_MODE:-off}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_CLIENT_EMAIL: ${FCM_CLIENT_EMAIL:-}
+      FCM_PRIVATE_KEY: ${FCM_PRIVATE_KEY:-}
+    volumes:
+      - ticket-uploads:/app/uploads
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # API Gateway (HU-02) - Único punto de entrada al backend
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: sd-gateway
+    restart: unless-stopped
+    depends_on:
+      auth-service:
+        condition: service_started
+      catalog-service:
+        condition: service_started
+      ticket-service:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: ${API_GATEWAY_PORT}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      CATALOG_SERVICE_URL: ${CATALOG_SERVICE_URL}
+      TICKET_SERVICE_URL: ${TICKET_SERVICE_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+    ports:
+      - "${API_GATEWAY_PORT}:8080"
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Frontend (React + Vite) - Servido por nginx en producción
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+    container_name: sd-frontend
+    restart: unless-stopped
+    depends_on:
+      - api-gateway
+    ports:
+      - "${FRONTEND_PORT}:80"
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3

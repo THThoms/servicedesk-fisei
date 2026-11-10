@@ -1,0 +1,264 @@
+// =============================================================================
+// ticket-service - Schema Prisma (ticket_db)
+// Cada ticket queda asociado a un usuario (FK lógica al auth_db) y a un
+// servicio (FK lógica al catalog_db). NO usamos foreign keys cruzadas:
+// la integridad se mantiene a nivel aplicación (microservicios independientes).
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Estados del ciclo de vida del ticket.
+// `abierto` se muestra como "Pendiente" en la UI (label, no rename).
+// `escalado` lo introducirá HU-08 en sus transiciones; HU-07 solo lo lista
+// para que el panel pueda filtrarlo si en el futuro existen tickets en él.
+// -----------------------------------------------------------------------------
+enum TicketStatus {
+  abierto
+  en_proceso
+  escalado
+  resuelto
+  cerrado
+}
+
+// Mismo enum que catalog-service.Level. Lo replicamos porque cada microservicio
+// es autónomo y no comparte código con el catalog.
+enum Level {
+  N1
+  N2
+  N3
+  N4
+}
+
+// HU-06: prioridad del ticket. Si no se especifica al crear, se asume `media`.
+// El motor de enrutamiento sube el level cuando es `alta` o `critica`.
+enum Priority {
+  baja
+  media
+  alta
+  critica
+}
+
+// Sprint 3+: área responsable del ticket. Espeja al enum de catalog-service.
+// TICS fue renombrado a DTIC; GENERAL fue eliminado (registros migrados a
+// TECHNICIANS) — ambos cambios se aplicaron con la migración SQL.
+enum ResponsibleArea {
+  TECHNICIANS
+  DTIC
+}
+
+// Sprint 2 (rev): estado de asignación independiente del status del ticket.
+// `unassigned` cuando todavía no entra a la bandeja (estado raro/transitorio).
+// `available`  cuando está en la bandeja esperando que un técnico lo tome.
+// `accepted`   cuando un técnico lo aceptó por sí mismo.
+// `assigned_by_admin` cuando lo asignó el admin manualmente.
+enum AssignmentStatus {
+  unassigned
+  available
+  accepted
+  assigned_by_admin
+}
+
+// -----------------------------------------------------------------------------
+// tickets - Cabecera del ticket. `number` es el identificador humano (TK-YYYYMMDD-NNN).
+// `level_assigned` se rellena al crear el ticket consultando catalog-service.
+// -----------------------------------------------------------------------------
+model Ticket {
+  id                     String           @id @default(uuid()) @db.Uuid
+  number                 String           @unique
+  userId                 String           @map("user_id") @db.Uuid // FK lógica -> auth_db.users.id
+  userName               String?          @map("user_name") // denormalizado para historial/listados
+  userEmail              String?          @map("user_email") // denormalizado
+  serviceId              String           @map("service_id") @db.Uuid // FK lógica -> catalog_db.services.id
+  serviceName            String?          @map("service_name") // denormalizado
+  detail                 String           @db.Text
+  location               String?          @db.VarChar(255)
+  status                 TicketStatus     @default(abierto)
+  priority               Priority         @default(media)
+  // Sprint 2 (rev) - asignación por categoría/área:
+  responsibleArea        ResponsibleArea  @default(TECHNICIANS) @map("responsible_area")
+  assignmentStatus       AssignmentStatus @default(available) @map("assignment_status")
+  assignedTechnicianId   String?          @map("assigned_technician_id") @db.Uuid
+  assignedTechnicianName String?          @map("assigned_technician_name")
+  acceptedAt             DateTime?        @map("accepted_at")
+  // Sprint 2 (rev): cierre del ticket con vínculo a la base de conocimiento.
+  // `knowledgeArticleId` es FK lógica a catalog_db.knowledge_articles.id (sin FK
+  // física entre microservicios). Todos opcionales para no romper datos previos.
+  resolvedAt             DateTime?        @map("resolved_at")
+  resolvedById           String?          @map("resolved_by_id") @db.Uuid
+  resolvedByName         String?          @map("resolved_by_name")
+  knowledgeArticleId     String?          @map("knowledge_article_id") @db.Uuid
+  resolutionSummary      String?          @map("resolution_summary") @db.Text
+  // Legacy HU-06/07/08: levelAssigned se mantiene calculado, pero la nueva
+  // lógica ya no filtra por él. Queda como referencia histórica.
+  levelAssigned          Level            @map("level_assigned")
+  createdAt              DateTime         @default(now()) @map("created_at")
+  updatedAt              DateTime         @updatedAt @map("updated_at")
+
+  attachments Attachment[]
+  events      TicketEvent[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([responsibleArea])
+  @@index([assignmentStatus])
+  @@index([assignedTechnicianId])
+  @@map("tickets")
+}
+
+// -----------------------------------------------------------------------------
+// HU-08 - Acciones registrables sobre un ticket. Extensible para HU-09 (historial).
+// -----------------------------------------------------------------------------
+enum EventAction {
+  CREATED
+  CATEGORIZED
+  AVAILABLE
+  ACCEPTED
+  ASSIGNED
+  CONTRIBUTED
+  STATUS_CHANGED
+  ESCALATED
+  REASSIGNED
+  COMMENTED
+  RESOLVED
+  CLOSED
+}
+
+// Sprint 2 (rev): visibilidad de un evento del historial.
+enum EventVisibility {
+  public
+  internal
+}
+
+// -----------------------------------------------------------------------------
+// HU-08 - Registro mínimo de eventos para auditoría / trazabilidad.
+// Diseñado para ser ampliado por HU-09 sin migraciones destructivas.
+// `performed_by_name` se denormaliza para que el historial siga siendo
+// legible si el usuario es renombrado o desactivado más adelante.
+// -----------------------------------------------------------------------------
+model TicketEvent {
+  id                   String           @id @default(uuid()) @db.Uuid
+  ticketId             String           @map("ticket_id") @db.Uuid
+  action               EventAction
+  title                String?
+  previousLevel        Level?           @map("previous_level")
+  newLevel             Level?           @map("new_level")
+  previousStatus       TicketStatus?    @map("previous_status")
+  newStatus            TicketStatus?    @map("new_status")
+  // Sprint 2 (rev): cambios de área y técnico para el escalamiento mejorado.
+  previousArea         ResponsibleArea? @map("previous_area")
+  newArea              ResponsibleArea? @map("new_area")
+  previousTechnicianId String?          @map("previous_technician_id") @db.Uuid
+  newTechnicianId      String?          @map("new_technician_id") @db.Uuid
+  reason               String?          @db.Text
+  workDone             String?          @map("work_done") @db.Text
+  description          String?          @db.Text
+  visibility           EventVisibility  @default(public)
+  performedBy          String           @map("performed_by") @db.Uuid
+  performedByName      String           @map("performed_by_name")
+  createdAt            DateTime         @default(now()) @map("created_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@index([createdAt])
+  @@map("ticket_events")
+}
+
+// -----------------------------------------------------------------------------
+// HU-15 - Email Outbox.
+// Patrón outbox: cada notificación se crea como registro `pending` dentro de
+// la misma transacción que muta el ticket. El envío real ocurre FUERA de la
+// transacción (best-effort). Si falla SMTP, la acción del ticket NO se
+// revierte: el registro queda `failed` con `lastError` y `attempts` para
+// reintento posterior por POST /admin/email-outbox/process.
+// -----------------------------------------------------------------------------
+enum EmailStatus {
+  pending
+  sent
+  failed
+}
+
+model EmailOutbox {
+  id        String      @id @default(uuid()) @db.Uuid
+  ticketId  String?     @map("ticket_id") @db.Uuid
+  to        String
+  subject   String
+  htmlBody  String      @map("html_body") @db.Text
+  textBody  String?     @map("text_body") @db.Text
+  // Tipo de evento del ticket: TICKET_ACCEPTED, TICKET_ASSIGNED, TICKET_ESCALATED,
+  // TICKET_RESOLVED, TICKET_CONTRIBUTION. String para no acoplar a un enum nuevo.
+  eventType String      @map("event_type")
+  status    EmailStatus @default(pending)
+  attempts  Int         @default(0)
+  lastError String?     @map("last_error") @db.Text
+  sentAt    DateTime?   @map("sent_at")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([ticketId])
+  @@index([createdAt])
+  @@map("email_outbox")
+}
+
+// -----------------------------------------------------------------------------
+// Sprint 4+ - Push notifications a la app Android (Firebase Cloud Messaging).
+// Un usuario (técnico) puede tener varios dispositivos activos simultáneamente
+// (móvil personal + tablet, por ejemplo). Un `token` es único a nivel FCM y
+// puede rotar; se distingue el mismo dispositivo por (userId, deviceId).
+// `is_active = false` = revocado o token expirado (FCM devolvió UNREGISTERED /
+// INVALID_ARGUMENT y el sender lo apagó best-effort).
+// Sin FK a auth_db (patrón microservicios); userId es UUID lógico.
+// -----------------------------------------------------------------------------
+model DeviceToken {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  token      String   @unique // token FCM (~150 chars, único)
+  platform   String // "android" | "ios" | "web"
+  deviceId   String?  @map("device_id") // identificador estable del dispositivo (opcional)
+  appVersion String?  @map("app_version")
+  isActive   Boolean  @default(true) @map("is_active")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([userId, isActive])
+  @@index([lastSeenAt])
+  @@map("device_tokens")
+}
+
+// -----------------------------------------------------------------------------
+// attachments - Imágenes adjuntas al ticket.
+// Sprint 3+: se prioriza `image_url` (URL absoluta o relativa). `file_path` se
+// mantiene para compatibilidad con adjuntos históricos que vivían en disco
+// local (/app/uploads). El backend prioriza image_url; si es null cae a
+// /uploads/<file_path>. `storage_provider` documenta dónde vive la imagen:
+//   - "local"      → disco montado en el contenedor de ticket-service
+//   - "cloudinary" → CDN externo (Cloudinary), URL absoluta HTTPS
+// Nueva imagen NUNCA se guarda como Base64.
+// -----------------------------------------------------------------------------
+model Attachment {
+  id              String   @id @default(uuid()) @db.Uuid
+  ticketId        String   @map("ticket_id") @db.Uuid
+  filePath        String?  @map("file_path")
+  imageUrl        String?  @map("image_url")
+  storageProvider String   @default("local") @map("storage_provider")
+  fileSize        Int      @map("file_size")
+  mimeType        String   @map("mime_type")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@map("attachments")
+}

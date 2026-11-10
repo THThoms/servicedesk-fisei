@@ -1,0 +1,90 @@
+// =============================================================================
+// auth-service - Schema Prisma (auth_db)
+// Solo este microservicio conoce esta base. Sin FK cruzadas a otros servicios:
+// la integridad referencial entre microservicios se logra por user_id (UUID).
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Enum de roles - reflejan la jerarquía técnica de la mesa de ayuda UTA
+// -----------------------------------------------------------------------------
+enum Role {
+  admin
+  tech_n1
+  tech_n2
+  tech_n3
+  tech_n4
+  user
+}
+
+// -----------------------------------------------------------------------------
+// users - Espejo local del usuario autenticado vía Microsoft Azure AD o local.
+// `microsoft_id` (object id de Azure AD) garantiza unicidad incluso si el email cambia.
+// `password_hash` almacena la contraseña hasheada para login local.
+// -----------------------------------------------------------------------------
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  email         String    @unique
+  name          String
+  role          Role      @default(user)
+  microsoftId   String?   @unique @map("ms_oid")
+  passwordHash  String?   @map("password_hash")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  // Relación 1:N con sesiones emitidas (auditoría / logout)
+  sessions   Session[]
+  authLogs   AuthLog[]
+
+  @@map("users")
+  @@index([email])
+}
+
+// -----------------------------------------------------------------------------
+// sessions - Tokens JWT emitidos. Permiten invalidar sesiones específicas.
+// `expires_at` lo controla la app, no la BD (para alinear con `JWT_EXPIRES_IN`).
+// `auth_provider` indica cómo inició sesión: local, microsoft, microsoft-simulated.
+// -----------------------------------------------------------------------------
+model Session {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  token        String    @unique @db.Text
+  authProvider String    @default("local") @map("auth_provider")
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+  @@index([userId])
+  @@index([token])
+}
+
+// -----------------------------------------------------------------------------
+// auth_logs - Registro de accesos al sistema (auditoría).
+// -----------------------------------------------------------------------------
+model AuthLog {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String?  @map("user_id") @db.Uuid
+  userEmail    String   @map("user_email")
+  userName     String   @map("user_name")
+  endpoint     String
+  authProvider String   @map("auth_provider")
+  accessDate   DateTime @default(now()) @map("access_date")
+
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("auth_logs")
+  @@index([userId])
+  @@index([userEmail])
+  @@index([accessDate])
+}

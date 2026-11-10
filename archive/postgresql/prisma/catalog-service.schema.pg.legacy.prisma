@@ -1,0 +1,148 @@
+// =============================================================================
+// catalog-service - Schema Prisma (catalog_db)
+// Catálogo de servicios institucionales y reglas de enrutamiento por nivel.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Niveles de la mesa de ayuda - corresponden a la jerarquía técnica de UTA.
+// N1: básico  | N2: profesional  | N3: DITIC  | N4: especializado
+// -----------------------------------------------------------------------------
+enum Level {
+  N1
+  N2
+  N3
+  N4
+}
+
+// -----------------------------------------------------------------------------
+// Sprint 3+: área responsable de atender el servicio/categoría.
+// TECHNICIANS: hardware, redes, equipos, impresoras, WiFi, aulas y laboratorios.
+// DTIC:        plataformas institucionales, sistema académico, accesos, MOODLE, SGA.
+// (Antes existía TICS -> renombrado a DTIC en migración; y GENERAL,
+//  eliminado en migración reasignando esos registros a TECHNICIANS.)
+// -----------------------------------------------------------------------------
+enum ResponsibleArea {
+  TECHNICIANS
+  DTIC
+}
+
+// -----------------------------------------------------------------------------
+// services - Catálogo público consumido por el formulario de creación de tickets.
+// `is_active = false` equivale a soft delete: deja de aparecer en el combobox
+// pero conserva el historial de tickets ya creados.
+// -----------------------------------------------------------------------------
+model Service {
+  id              String              @id @default(uuid()) @db.Uuid
+  name            String              @unique
+  description     String?
+  levelEntry      Level               @map("level_entry")
+  // Sprint 2 (rev): área responsable. Determina qué técnicos pueden tomar el ticket.
+  responsibleArea ResponsibleArea     @default(TECHNICIANS) @map("responsible_area")
+  isActive        Boolean             @default(true) @map("is_active")
+  createdAt       DateTime            @default(now()) @map("created_at")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
+
+  // Relación 1:1 con la regla de enrutamiento. La separamos en una tabla
+  // aparte porque podría evolucionar (ej. enrutamiento por horario / carga).
+  routingRule     RoutingRule?
+
+  // HU-10: artículos de la base de conocimiento asociados a este servicio.
+  knowledgeArticles KnowledgeArticle[]
+
+  @@map("services")
+  @@index([isActive])
+}
+
+// -----------------------------------------------------------------------------
+// routing_rules - Motor de enrutamiento configurable (HU-06).
+// `level_entry`        nivel por defecto cuando no hay prioridad o es baja/media.
+// `priority_high`      nivel a usar si el ticket tiene prioridad alta (opcional).
+// `priority_critical`  nivel a usar si el ticket tiene prioridad crítica (opcional).
+// `is_critical`        servicio marcado como crítico: prioridad alta o crítica
+//                      fuerza escalamiento al mayor nivel configurado.
+// -----------------------------------------------------------------------------
+model RoutingRule {
+  id                String   @id @default(uuid()) @db.Uuid
+  serviceId         String   @unique @map("service_id") @db.Uuid
+  levelEntry        Level    @map("level_entry")
+  priorityHigh      Level?   @map("priority_high")
+  priorityCritical  Level?   @map("priority_critical")
+  isCritical        Boolean  @default(false) @map("is_critical")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  service           Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@map("routing_rules")
+}
+
+// -----------------------------------------------------------------------------
+// Sprint 3+ - Catálogo de ubicaciones físicas donde puede originarse un
+// ticket (laboratorios, aulas, oficinas, biblioteca, etc.). Se persiste aquí
+// porque catalog_db es la fuente de verdad institucional; ticket_db guarda
+// solo el nombre (denormalizado) para no crear FK cruzada entre microservicios.
+// `is_active = false` = soft delete (deja de mostrarse en el combobox).
+// -----------------------------------------------------------------------------
+model Location {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @unique
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("locations")
+  @@index([isActive])
+}
+
+// -----------------------------------------------------------------------------
+// HU-10 - Base de conocimiento institucional.
+// Sprint B (Fase preparación MSSQL): `keywords String[]` PostgreSQL se elimina
+// y se reemplaza por la tabla puente `KnowledgeKeyword` (1:N). El motor de
+// SQL Server no soporta arrays nativos; homogeneizando el shape de datos entre
+// ambos providers, un mismo código de aplicación queda portable.
+// `createdByUserId` es FK lógica al auth_db.users.id (sin FK Prisma cruzada).
+// -----------------------------------------------------------------------------
+model KnowledgeArticle {
+  id                 String   @id @default(uuid()) @db.Uuid
+  title              String
+  problemDescription String   @db.Text @map("problem_description")
+  solution           String   @db.Text
+  serviceId          String?  @map("service_id") @db.Uuid
+  createdByUserId    String?  @map("created_by_user_id") @db.Uuid
+  isActive           Boolean  @default(true) @map("is_active")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  service            Service?           @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  keywords           KnowledgeKeyword[]
+
+  @@map("knowledge_articles")
+  @@index([isActive])
+  @@index([serviceId])
+  @@index([updatedAt])
+}
+
+// Sprint B - Tabla puente 1:N para reemplazar `keywords String[]`.
+// Keywords se guardan siempre en lowercase (idéntica normalización al
+// comportamiento previo). `@@unique([articleId, keyword])` evita duplicados
+// por artículo.
+model KnowledgeKeyword {
+  id          String           @id @default(uuid()) @db.Uuid
+  articleId   String           @map("article_id") @db.Uuid
+  keyword     String
+
+  article     KnowledgeArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@map("knowledge_keywords")
+  @@unique([articleId, keyword])
+  @@index([articleId])
+  @@index([keyword])
+}
