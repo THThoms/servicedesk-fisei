@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Azul institucional UTA. Se usa como color por defecto de las
+         notificaciones push mostradas por Firebase Messaging. -->
+    <color name="colorPrimary">#1E3A8A</color>
+</resources>
