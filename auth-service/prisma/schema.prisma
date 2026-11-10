@@ -1,0 +1,92 @@
+// =============================================================================
+// auth-service - Schema Prisma para LABORATORIO SQL Server 2022 (Fase B).
+// Copia paralela de schema.prisma. NO reemplaza al schema de producción.
+//
+// Diferencias clave respecto a la versión PostgreSQL:
+//   · provider = "sqlserver"
+//   · @db.Uuid  -> @db.UniqueIdentifier
+//   · @db.Text (unique) -> @db.NVarChar(2048)  (SQL Server no acepta unique
+//                                                index sobre NVARCHAR(MAX))
+//   · @db.Text (no unique) -> @db.NVarChar(Max)
+//
+// Uso:
+//   npx prisma db push \
+//       --schema=auth-service/prisma/schema.mssql.prisma
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// Sprint B: Prisma sobre SQL Server NO admite enums. Se sustituyen por String
+// y la validación vive en `src/domain/enums.ts` (tipo unión). Longitud 32
+// alcanza para todos los valores del dominio (`admin`..`tech_n4`, `user`).
+// Los valores permitidos: admin | tech_n1 | tech_n2 | tech_n3 | tech_n4 | user
+
+model User {
+  id            String    @id @default(uuid()) @db.UniqueIdentifier
+  email         String    @unique
+  name          String
+  role          String    @default("user") @db.NVarChar(32)
+  // Sprint C: la unicidad de microsoftId NO se declara con `@unique` — SQL Server
+  // no permite múltiples NULL en unique indexes tradicionales y la mayoría de
+  // usuarios locales no tienen ms_oid. La unicidad efectiva se aplica con un
+  // FILTERED unique index (WHERE ms_oid IS NOT NULL) desde el entrypoint.
+  microsoftId   String?   @map("ms_oid")
+  passwordHash  String?   @map("password_hash")
+  // Fase R: obliga a cambiar la contraseña temporal (bootstrap / reset).
+  mustChangePassword Boolean @default(false) @map("must_change_password")
+  // Fase T: bloque físico de la FISEI (BLOQUE_1 | BLOQUE_2) SOLO para técnicos
+  // (rol technician). Clasificación administrativa: NO es un rol ni da acceso.
+  // NULL = sin clasificar (no se asigna automáticamente). DTIC nunca tiene bloque.
+  block         String?   @map("fisei_block") @db.NVarChar(16)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  sessions   Session[]
+  authLogs   AuthLog[]
+
+  @@map("users")
+  @@index([email])
+}
+
+model Session {
+  id           String    @id @default(uuid()) @db.UniqueIdentifier
+  userId       String    @map("user_id") @db.UniqueIdentifier
+  // NVarChar(2048): SQL Server exige tamaño finito para UNIQUE. Los JWT HS256
+  // del proyecto ronda los 300–600 chars; 2048 deja margen y ocupa < 4KB por fila.
+  // Fase R: SHA-256 (hex) del JWT. Nunca el token completo. Se conserva el
+  // nombre de columna `token` para que el cambio no requiera migración destructiva.
+  tokenHash    String    @unique @map("token") @db.NVarChar(2048)
+  authProvider String    @default("local") @map("auth_provider")
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+  @@index([userId])
+}
+
+model AuthLog {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  userId       String?  @map("user_id") @db.UniqueIdentifier
+  userEmail    String   @map("user_email")
+  userName     String   @map("user_name")
+  endpoint     String
+  authProvider String   @map("auth_provider")
+  accessDate   DateTime @default(now()) @map("access_date")
+
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("auth_logs")
+  @@index([userId])
+  @@index([userEmail])
+  @@index([accessDate])
+}
