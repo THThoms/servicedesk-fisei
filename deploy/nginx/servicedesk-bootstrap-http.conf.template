@@ -1,0 +1,15 @@
+# =============================================================================
+# ServiceDesk UTA — nginx del HOST · ARRANQUE (antes de tener certificado)
+# Solo sirve el desafío ACME para que certbot emita el certificado. No publica
+# la aplicación por HTTP. Tras emitir el certificado se reemplaza por
+# servicedesk.conf.template (scripts/install-server.sh --nginx-tls).
+# Marcador: __SERVER_NAME__
+# =============================================================================
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __SERVER_NAME__;
+
+    location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 503 "ServiceDesk UTA: certificado TLS pendiente de emisión.\n"; }
+}

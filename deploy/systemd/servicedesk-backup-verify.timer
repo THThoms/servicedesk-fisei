@@ -1,0 +1,12 @@
+# Domingo 05:30 (después de la retención). Persistent=true recupera ejecuciones perdidas.
+[Unit]
+Description=ServiceDesk UTA - Timer de revisión semanal del repositorio
+
+[Timer]
+OnCalendar=Sun *-*-* 05:30:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=servicedesk-backup-verify.service
+
+[Install]
+WantedBy=timers.target

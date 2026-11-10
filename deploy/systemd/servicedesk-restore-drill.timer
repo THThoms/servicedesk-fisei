@@ -1,0 +1,12 @@
+# Día 1 de cada mes a las 06:00. Persistent=true: si el servidor estaba apagado, al arrancar.
+[Unit]
+Description=ServiceDesk UTA - Timer de restore drill mensual
+
+[Timer]
+OnCalendar=*-*-01 06:00:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=servicedesk-restore-drill.service
+
+[Install]
+WantedBy=timers.target

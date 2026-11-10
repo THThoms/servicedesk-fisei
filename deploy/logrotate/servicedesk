@@ -1,0 +1,11 @@
+# ServiceDesk UTA — rotación de logs del HOST (/etc/logrotate.d/servicedesk).
+# Los logs de los contenedores los rota Docker (json-file, 20 MB x 5).
+/var/log/servicedesk-alerts.log /var/log/servicedesk/*.log {
+    weekly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+}

@@ -1,0 +1,17 @@
+# ServiceDesk UTA — retención semanal: 14 diarios · 8 semanales · 12 mensuales.
+# Solo se aplica si el repositorio está íntegro y existe un snapshot reciente y
+# completo; el último snapshot nunca se elimina (scripts/backup/restic-retention.sh).
+[Unit]
+Description=ServiceDesk UTA - Retención de snapshots (forget + prune)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+OnFailure=servicedesk-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=SD_DIR=__SD_DIR__
+Environment=SD_BACKUP_ENV=/etc/servicedesk/backup.env
+ExecStart=__SD_DIR__/scripts/backup/restic-retention.sh --prune
+Nice=10
+TimeoutStartSec=4h

@@ -1,0 +1,107 @@
+# =============================================================================
+# ServiceDesk UTA — nginx del HOST (proxy TLS) · PLANTILLA
+#
+# Marcadores (los sustituye scripts/install-server.sh o se editan a mano):
+#   __SERVER_NAME__        dominio público, p. ej. servicedesk.ejemplo.edu.ec
+#   __UPSTREAM_GATEWAY__   127.0.0.1:<GATEWAY_BIND_PORT>   (por defecto 127.0.0.1:8080)
+#   __UPSTREAM_FRONTEND__  127.0.0.1:<FRONTEND_BIND_PORT>  (por defecto 127.0.0.1:3000)
+#   __CERT_DIR__           /etc/letsencrypt/live/__SERVER_NAME__
+#
+# Requiere que el certificado exista. Para emitirlo la primera vez se usa
+# servicedesk-bootstrap-http.conf.template (solo HTTP + desafío ACME).
+#
+# Rutas:
+#   /api/*   → API Gateway (incluye /api/auth/microsoft/callback y las imágenes
+#              autenticadas /api/tickets/:id/attachments/:aid)
+#   /auth/callback → API Gateway → auth-service: es la Redirect URI registrada
+#              en Azure para el VPS (https://<dominio>/auth/callback); se conserva
+#              la misma convención para no tener que cambiar el registro de Azure.
+#   /healthz → /health/ready del gateway (readiness real: 3 servicios + sus bases)
+#   resto    → SPA (frontend). /auth/success es una ruta de la SPA.
+# La aplicación no usa WebSocket.
+# =============================================================================
+
+# Límite de intentos de login por IP (fuerza bruta).
+limit_req_zone $binary_remote_addr zone=sd_login:10m rate=10r/m;
+
+upstream servicedesk_gateway  { server __UPSTREAM_GATEWAY__;  keepalive 16; }
+upstream servicedesk_frontend { server __UPSTREAM_FRONTEND__; keepalive 8; }
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __SERVER_NAME__;
+
+    location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    # "ssl http2" en listen: compatible con nginx 1.24 (Ubuntu 24.04). En
+    # nginx ≥1.25 emite solo un aviso de directiva obsoleta.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name __SERVER_NAME__;
+
+    ssl_certificate     __CERT_DIR__/fullchain.pem;
+    ssl_certificate_key __CERT_DIR__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:sd_ssl:10m;
+    ssl_session_timeout 1d;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    server_tokens off;
+
+    # Adjuntos: hasta 5 imágenes de 5 MB por ticket (+ margen multipart).
+    client_max_body_size 30m;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 10s;
+    proxy_read_timeout    60s;
+    proxy_send_timeout    60s;
+    # Clientes lentos o colgados no retienen conexiones (subidas incluidas).
+    client_header_timeout 15s;
+    client_body_timeout   60s;
+    send_timeout          60s;
+    keepalive_timeout     65s;
+
+    location = /api/auth/login {
+        limit_req zone=sd_login burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://servicedesk_gateway;
+    }
+
+    location /api/ {
+        proxy_pass http://servicedesk_gateway;
+    }
+
+    # Callback de Microsoft (Redirect URI de Azure). Va al BACKEND, no a la SPA.
+    location = /auth/callback {
+        proxy_pass http://servicedesk_gateway;
+    }
+
+    location = /healthz {
+        proxy_pass http://servicedesk_gateway/health/ready;
+        access_log off;
+    }
+
+    # Nunca exponer rutas internas de ficheros: las imágenes van por /api/.
+    location ^~ /uploads/ { return 404; }
+
+    location / {
+        proxy_pass http://servicedesk_frontend;
+    }
+}

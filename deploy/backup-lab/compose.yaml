@@ -1,0 +1,49 @@
+# =============================================================================
+# deploy/backup-lab/compose.yaml — S3 de LABORATORIO (MinIO) para probar Restic
+#
+# SOLO PRUEBAS. Se gestiona con deploy/backup-lab/lab.sh (no a mano):
+#   · proyecto Docker propio "sdbackuplab", volumen y red propios;
+#   · red INTERNA (internal: true): sin salida a Internet ni puertos publicados;
+#     solo los contenedores de restic unidos a esta red alcanzan el S3;
+#   · TLS con una CA autofirmada generada por lab.sh (como B2, todo va por https);
+#   · bucket privado y usuario de laboratorio con política limitada a ese bucket.
+#
+# Imagen: MinIO dejó de publicar imágenes oficiales en Docker Hub/quay.io en 2025.
+# Se usa bitnamilegacy/minio:2025.4.22 (MinIO RELEASE.2025-04-22, congelada,
+# sin actualizaciones de seguridad): aceptable para un laboratorio aislado,
+# NUNCA para guardar datos reales.
+# =============================================================================
+name: sdbackuplab
+
+networks:
+  s3:
+    internal: true
+
+volumes:
+  minio-data:
+  minio-certs:
+    external: true
+    name: sdbackuplab_minio-certs
+
+services:
+  minio:
+    image: bitnamilegacy/minio:2025.4.22
+    entrypoint: ["minio"]
+    command: ["server", "/bitnami/minio/data", "--address", ":9000", "--console-address", ":9001", "--certs-dir", "/certs"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?generado por lab.sh}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?generado por lab.sh}
+      MINIO_BROWSER: "off"
+    volumes:
+      - minio-data:/bitnami/minio/data
+      - minio-certs:/certs:ro
+    networks:
+      s3:
+        aliases: [minio]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: "no"

@@ -1,0 +1,10 @@
+[Unit]
+Description=ServiceDesk UTA - Timer de verificación de backups (cada 6 h)
+
+[Timer]
+OnCalendar=*-*-* 00/6:30:00
+Persistent=true
+Unit=servicedesk-backup-check.service
+
+[Install]
+WantedBy=timers.target

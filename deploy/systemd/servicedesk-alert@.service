@@ -1,0 +1,12 @@
+# ServiceDesk UTA — alerta cuando falla una unidad (OnFailure=).
+# Siempre deja constancia en el journal (prioridad err) y en
+# /var/log/servicedesk-alerts.log, con el motivo (espacio, VERIFYONLY, checksum,
+# credenciales, repositorio, S3, drill…). Opcional en deploy/server/.env:
+# BACKUP_ALERT_EMAIL (requiere `mail`) y BACKUP_ALERT_WEBHOOK_URL.
+[Unit]
+Description=ServiceDesk UTA - Alerta de fallo de %i
+
+[Service]
+Type=oneshot
+Environment=SD_DIR=__SD_DIR__
+ExecStart=__SD_DIR__/scripts/operations/alert.sh %i

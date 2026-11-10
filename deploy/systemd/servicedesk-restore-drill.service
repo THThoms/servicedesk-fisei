@@ -1,0 +1,20 @@
+# ServiceDesk UTA — restauración de PRUEBA mensual desde el último snapshot
+# cifrado: 3 bases como *_restore_verify en un SQL Server efímero aislado
+# (DRILL_MODE=ephemeral, necesita ~2 GB de RAM libres) o en la propia instancia
+# (DRILL_MODE=instance), CHECKDB, conteos, relaciones e imágenes.
+# Informe: $BACKUP_DIR/drills/drill-<UTC>.json
+[Unit]
+Description=ServiceDesk UTA - Restore drill (restauración de prueba verificada)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+OnFailure=servicedesk-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=SD_DIR=__SD_DIR__
+Environment=SD_BACKUP_ENV=/etc/servicedesk/backup.env
+ExecStart=__SD_DIR__/scripts/backup/restore-drill.sh
+UMask=0077
+Nice=10
+TimeoutStartSec=3h

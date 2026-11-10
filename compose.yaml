@@ -1,0 +1,239 @@
+# =============================================================================
+# ServiceDesk UTA — entorno de DESARROLLO / LABORATORIO local (SQL Server 2022)
+#
+#   docker compose --env-file .env.mssql up -d --build
+#   docker compose --env-file .env.mssql ps
+#   docker compose --env-file .env.mssql down          # NUNCA "down -v"
+#
+# Plantilla de variables: .env.example (copiar a .env.mssql para el laboratorio).
+#
+# Puertos publicados SOLO en 127.0.0.1:
+#   14330 → SQL Server · 18080 → API Gateway · 13000 → Frontend
+#
+# Este archivo sustituye a docker-compose.mssql.yml (Fase P). Conserva el
+# nombre de proyecto, de contenedores y de volúmenes del laboratorio para que
+# los datos existentes sigan disponibles.
+#
+# Diferencias con producción (deploy/server/compose.yaml):
+#   · SQL Server en edición Developer (solo desarrollo/pruebas).
+#   · auth-service en NODE_ENV=development: permite dev-login, login Microsoft
+#     simulado y cuentas demo. En producción esos mecanismos están bloqueados
+#     en código.
+#   · Correo en modo "log", almacenamiento local y FCM apagado.
+#
+# Producción ACTUAL (VPS):  docker-compose.prod-mssql.yml  (no modificar)
+# Servidor NUEVO:           deploy/server/compose.yaml
+# =============================================================================
+name: servicedesk-microservices
+
+networks:
+  sd-mssql-lab-net:
+    driver: bridge
+
+volumes:
+  mssql-lab-data:
+  mssql-lab-log:
+  mssql-lab-secrets:
+  mssql-lab-uploads:
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sd-mssql-lab
+    restart: unless-stopped
+    user: "0:0"
+    logging: *default-logging
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Define MSSQL_SA_PASSWORD en .env.mssql}
+      MSSQL_PID: "Developer"
+      MSSQL_COLLATION: "SQL_Latin1_General_CP1_CI_AS"
+    ports:
+      - "127.0.0.1:${MSSQL_HOST_PORT:-14330}:1433"
+    volumes:
+      - mssql-lab-data:/var/opt/mssql/data
+      - mssql-lab-log:/var/opt/mssql/log
+      - mssql-lab-secrets:/var/opt/mssql/secrets
+    networks: [sd-mssql-lab-net]
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa
+          -P "$$MSSQL_SA_PASSWORD" -C -l 3 -Q "SELECT 1" > /dev/null || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sd-mssql-lab-init
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      AUTH_DB_NAME: ${AUTH_DB_NAME:-auth_db}
+      AUTH_DB_USER: ${AUTH_DB_USER:-auth_user}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD:?Define AUTH_DB_PASSWORD}
+      CATALOG_DB_NAME: ${CATALOG_DB_NAME:-catalog_db}
+      CATALOG_DB_USER: ${CATALOG_DB_USER:-catalog_user}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:?Define CATALOG_DB_PASSWORD}
+      TICKET_DB_NAME: ${TICKET_DB_NAME:-ticket_db}
+      TICKET_DB_USER: ${TICKET_DB_USER:-ticket_user}
+      TICKET_DB_PASSWORD: ${TICKET_DB_PASSWORD:?Define TICKET_DB_PASSWORD}
+    volumes:
+      - ./scripts/init-mssql-lab.sql:/init/init-mssql-lab.sql:ro
+      - ./scripts/init-mssql-lab.sh:/init/init-mssql-lab.sh:ro
+    networks: [sd-mssql-lab-net]
+    entrypoint: ["/bin/bash", "/init/init-mssql-lab.sh"]
+    restart: "no"
+
+  auth-service:
+    build: { context: ./auth-service, dockerfile: Dockerfile.mssql }
+    container_name: sd-auth-mssql
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      mssql: { condition: service_healthy }
+      mssql-init: { condition: service_completed_successfully }
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    environment:
+      # development: habilita los mecanismos de laboratorio (bloqueados en production).
+      NODE_ENV: development
+      NODE_OPTIONS: --dns-result-order=ipv4first
+      PORT: 3001
+      DATABASE_URL: sqlserver://mssql:1433;database=${AUTH_DB_NAME:-auth_db};user=${AUTH_DB_USER:-auth_user};password=${AUTH_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET:?Define JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      # SSO real de Microsoft (opcional en el laboratorio): las 3 credenciales de
+      # Azure y la Redirect URI registrada (http://localhost:8080/auth/callback,
+      # con API_GATEWAY_HOST_PORT=8080) van en .env.mssql. Vacías → login simulado.
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-http://localhost:18080/auth/callback}
+      ALLOWED_DOMAIN: ${ALLOWED_DOMAIN:-uta.edu.ec}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-admin@uta.edu.ec}
+      AUTH_DEV_LOGIN: ${AUTH_DEV_LOGIN:-true}
+      AUTH_MICROSOFT_SIMULATE: ${AUTH_MICROSOFT_SIMULATE:-true}
+      SEED_DEMO_USERS: ${SEED_DEMO_USERS:-true}
+      TRUST_PROXY_HOPS: "1"
+      FRONTEND_URL: http://localhost:13000
+    networks: [sd-mssql-lab-net]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  catalog-service:
+    build: { context: ./catalog-service, dockerfile: Dockerfile.mssql }
+    container_name: sd-catalog-mssql
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      mssql: { condition: service_healthy }
+      mssql-init: { condition: service_completed_successfully }
+    environment:
+      NODE_ENV: production
+      PORT: 3002
+      DATABASE_URL: sqlserver://mssql:1433;database=${CATALOG_DB_NAME:-catalog_db};user=${CATALOG_DB_USER:-catalog_user};password=${CATALOG_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET}
+      AUTH_SERVICE_URL: http://auth-service:3001
+      AUTH_INTROSPECTION: "true"
+    networks: [sd-mssql-lab-net]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  ticket-service:
+    build: { context: ./ticket-service, dockerfile: Dockerfile.mssql }
+    container_name: sd-ticket-mssql
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      mssql: { condition: service_healthy }
+      catalog-service: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      PORT: 3003
+      DATABASE_URL: sqlserver://mssql:1433;database=${TICKET_DB_NAME:-ticket_db};user=${TICKET_DB_USER:-ticket_user};password=${TICKET_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET}
+      CATALOG_SERVICE_URL: http://catalog-service:3002
+      AUTH_SERVICE_URL: http://auth-service:3001
+      AUTH_INTROSPECTION: "true"
+      FRONTEND_URL: http://localhost:13000
+      EMAIL_NOTIFICATIONS_ENABLED: "true"
+      EMAIL_SEND_MODE: log
+      SMTP_FROM: "ServiceDesk UTA <no-reply@lab.local>"
+      STORAGE_MODE: local
+      FCM_MODE: "off"
+    volumes:
+      - mssql-lab-uploads:/app/uploads
+    networks: [sd-mssql-lab-net]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  api-gateway:
+    build: { context: ./api-gateway, dockerfile: Dockerfile }
+    container_name: sd-gateway-mssql
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      auth-service: { condition: service_started }
+      catalog-service: { condition: service_started }
+      ticket-service: { condition: service_started }
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      AUTH_SERVICE_URL: http://auth-service:3001
+      CATALOG_SERVICE_URL: http://catalog-service:3002
+      TICKET_SERVICE_URL: http://ticket-service:3003
+      FRONTEND_URL: http://localhost:13000
+    ports:
+      - "127.0.0.1:${API_GATEWAY_HOST_PORT:-18080}:8080"
+    networks: [sd-mssql-lab-net]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL_LAB:-http://localhost:18080}
+    container_name: sd-frontend-mssql
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on: [api-gateway]
+    ports:
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-13000}:80"
+    networks: [sd-mssql-lab-net]
+    healthcheck:
+      # 127.0.0.1 y no "localhost": en nginx:alpine "localhost" resuelve a ::1
+      # y nginx.conf solo escucha IPv4 → falso "unhealthy" (Fase P).
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3

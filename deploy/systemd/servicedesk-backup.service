@@ -1,0 +1,26 @@
+# ServiceDesk UTA — backup diario: SQL Server 2022 (auth_db, catalog_db, ticket_db)
+# + imágenes + configuración → conjunto local verificado → Restic cifrado → B2/S3.
+# Instalación: scripts/install-server.sh (o manual, ver docs/operations/BACKUPS_MSSQL.md)
+# __SD_DIR__ se sustituye por la ruta de instalación (p. ej. /opt/servicedesk).
+# Termina con error (y dispara la alerta) si CUALQUIER base falla, si la
+# verificación falla, si no hay copia externa (código 3) o si falla Restic (4).
+[Unit]
+Description=ServiceDesk UTA - Backup diario cifrado (SQL Server + imágenes + configuración)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+OnFailure=servicedesk-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=SD_DIR=__SD_DIR__
+Environment=SD_BACKUP_ENV=/etc/servicedesk/backup.env
+ExecStart=__SD_DIR__/scripts/backup-mssql.sh
+User=root
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=3h
+StandardOutput=journal
+StandardError=journal

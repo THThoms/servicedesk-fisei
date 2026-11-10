@@ -1,0 +1,11 @@
+# Domingo 04:30 (después del backup diario de las 03:15).
+[Unit]
+Description=ServiceDesk UTA - Timer de retención semanal
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+Unit=servicedesk-backup-retention.service
+
+[Install]
+WantedBy=timers.target

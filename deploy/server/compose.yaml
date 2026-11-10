@@ -1,0 +1,334 @@
+# =============================================================================
+# ServiceDesk UTA — SERVIDOR NUEVO (producción) · SQL Server 2022 únicamente
+#
+# Uso (desde deploy/server/, con deploy/server/.env creado a partir de
+# ../../.env.example). Normalmente lo invoca scripts/install-server.sh:
+#
+#   docker compose up -d --build
+#   docker compose ps
+#
+# Diseño:
+#   · Redes separadas:
+#       data  (internal: sin salida a Internet) → mssql + 3 microservicios
+#       app   → gateway + microservicios (egreso para Microsoft SSO, SMTP, FCM)
+#       edge  → gateway + frontend (lo único publicado, y SOLO en 127.0.0.1)
+#   · SQL Server NO publica el 1433: solo es alcanzable dentro de "data".
+#   · Volúmenes con nombres propios del proyecto (servicedesk_*): no reutiliza
+#     ningún volumen del VPS anterior. SQL Server separa sistema, datos, log de
+#     transacciones y backups temporales en volúmenes independientes; el
+#     servicio mssql-volumes fija su propietario (mssql, uid 10001) antes del
+#     arranque, de forma idempotente.
+#   · Imágenes FIJADAS (Fase T): SQL Server 2022 CU27-GDR1 por digest; Node
+#     22.23.4 (LTS) y nginx 1.28.3 en los Dockerfiles. Nada de "latest".
+#   · Healthchecks de READINESS (/health/ready): cada servicio comprueba su base
+#     de datos con una consulta real; ticket-service además el volumen de
+#     imágenes; el gateway, que los 3 servicios estén listos.
+#   · SERVER_PURPOSE=pruebas permite SQL Server Developer (solo desarrollo y
+#     pruebas, NUNCA producción). Cambiar de edición = cambiar MSSQL_PID en el
+#     .env y recrear mssql: no requiere tocar los microservicios.
+#   · NODE_ENV=production en todos los servicios ⇒ dev-login, login Microsoft
+#     simulado y cuentas demo quedan bloqueados en el backend.
+#   · RUN_SEED=false por defecto. El instalador lo activa SOLO en el primer
+#     arranque del modo LIMPIO. En modo RESTAURACIÓN nunca se siembra.
+#   · PRISMA_ACCEPT_DATA_LOSS=false: un cambio de esquema con pérdida de datos
+#     hace FALLAR el arranque en vez de borrar columnas.
+#
+# NO usar con los volúmenes del VPS actual. NO ejecutar "down -v".
+# =============================================================================
+name: servicedesk
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+# Fase R: ningún proceso de la app puede ganar privilegios (setuid, etc.).
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+x-node-health: &node-health
+  interval: 15s
+  timeout: 5s
+  retries: 10
+  start_period: 90s
+
+networks:
+  data:
+    internal: true
+  app: {}
+  edge: {}
+
+x-mssql-image: &mssql-image ${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718}
+
+volumes:
+  mssql-system:    # /var/opt/mssql        configuración, secrets, errorlog
+  mssql-data:      # /var/opt/mssql/data   archivos de datos (.mdf) de todas las bases
+  mssql-tlog:      # /var/opt/mssql/tlog   logs de transacciones (.ldf) de las bases nuevas
+  mssql-backup:    # /var/opt/mssql/backup .bak temporales de backup-mssql.sh / restore
+  ticket-uploads:  # /app/uploads          imágenes adjuntas (incluido en el backup Restic)
+
+services:
+  # ---------------------------------------------------------------------------
+  # SQL Server 2022 — edición OBLIGATORIA vía MSSQL_PID (sin valor por defecto).
+  # ---------------------------------------------------------------------------
+  # Prepara los volúmenes de SQL Server: propietario mssql (10001) y 770. Solo
+  # cambia lo que no esté ya bien (idempotente); no borra ni mueve datos.
+  mssql-volumes:
+    image: *mssql-image
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        for d in /var/opt/mssql /var/opt/mssql/data /var/opt/mssql/tlog /var/opt/mssql/backup; do
+        [ "$$(stat -c %u:%g $$d)" = 10001:10001 ] || chown 10001:10001 $$d;
+        chmod 770 $$d; done; echo volúmenes-mssql-listos
+    volumes:
+      - mssql-system:/var/opt/mssql
+      - mssql-data:/var/opt/mssql/data
+      - mssql-tlog:/var/opt/mssql/tlog
+      - mssql-backup:/var/opt/mssql/backup
+    network_mode: none
+    restart: "no"
+
+  mssql:
+    image: *mssql-image
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      mssql-volumes: { condition: service_completed_successfully }
+    stop_grace_period: 60s
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: ${MSSQL_PID:?Define MSSQL_PID (Developer solo con SERVER_PURPOSE=pruebas; Express|Standard|Enterprise|clave). Ver CONFIGURACION_SQL_SERVER.md}
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Define MSSQL_SA_PASSWORD}
+      MSSQL_COLLATION: SQL_Latin1_General_CP1_CI_AS
+      MSSQL_MEMORY_LIMIT_MB: ${MSSQL_MEMORY_LIMIT_MB:-2048}
+      MSSQL_AGENT_ENABLED: "false"
+      MSSQL_DATA_DIR: /var/opt/mssql/data
+      MSSQL_LOG_DIR: /var/opt/mssql/tlog
+      MSSQL_BACKUP_DIR: /var/opt/mssql/backup
+    # SQL Server corre SIN root (usuario mssql). Los subvolúmenes los prepara
+    # mssql-volumes (antes, montarlos sin preparar fallaba con "Access is denied").
+    volumes:
+      - mssql-system:/var/opt/mssql
+      - mssql-data:/var/opt/mssql/data
+      - mssql-tlog:/var/opt/mssql/tlog
+      - mssql-backup:/var/opt/mssql/backup
+    networks: [data]
+    deploy:
+      resources:
+        limits:
+          memory: ${MSSQL_CONTAINER_MEMORY:-3g}
+          cpus: "${MSSQL_CPUS:-2}"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          /opt/mssql-tools18/bin/sqlcmd -S 127.0.0.1 -U sa -P "$$MSSQL_SA_PASSWORD"
+          -C -l 5 -Q "SET NOCOUNT ON; SELECT 1" > /dev/null || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # mssql-init — crea/verifica las 3 bases y los 3 logins (idempotente).
+  # También: sincroniza contraseñas de login con .env (rotación), re-mapea
+  # usuarios huérfanos tras un RESTORE y fija RECOVERY SIMPLE.
+  # ---------------------------------------------------------------------------
+  mssql-init:
+    image: *mssql-image
+    depends_on:
+      mssql: { condition: service_healthy }
+    environment:
+      MSSQL_HOST: mssql
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      AUTH_DB_NAME: ${AUTH_DB_NAME:-auth_db}
+      AUTH_DB_USER: ${AUTH_DB_USER:-auth_user}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD:?Define AUTH_DB_PASSWORD}
+      CATALOG_DB_NAME: ${CATALOG_DB_NAME:-catalog_db}
+      CATALOG_DB_USER: ${CATALOG_DB_USER:-catalog_user}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:?Define CATALOG_DB_PASSWORD}
+      TICKET_DB_NAME: ${TICKET_DB_NAME:-ticket_db}
+      TICKET_DB_USER: ${TICKET_DB_USER:-ticket_user}
+      TICKET_DB_PASSWORD: ${TICKET_DB_PASSWORD:?Define TICKET_DB_PASSWORD}
+    volumes:
+      - ./mssql-init:/init:ro
+    networks: [data]
+    entrypoint: ["/bin/bash", "/init/init.sh"]
+    restart: "no"
+
+  auth-service:
+    build: { context: ../../auth-service, dockerfile: Dockerfile.mssql }
+    image: servicedesk/auth-service:${SERVICEDESK_VERSION:-local}
+    <<: *hardening
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      mssql: { condition: service_healthy }
+      mssql-init: { condition: service_completed_successfully }
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --dns-result-order=ipv4first
+      PORT: 3001
+      DATABASE_URL: sqlserver://mssql:1433;database=${AUTH_DB_NAME:-auth_db};user=${AUTH_DB_USER:-auth_user};password=${AUTH_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET:?Define JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-}
+      ALLOWED_DOMAIN: ${ALLOWED_DOMAIN:-uta.edu.ec}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      FRONTEND_URL: ${PUBLIC_SCHEME:-https}://${PUBLIC_DOMAIN:?Define PUBLIC_DOMAIN}
+      # Fase R: el admin inicial se crea con el bootstrap seguro
+      # (manage-user.sh bootstrap-admin): ninguna contraseña vive en el entorno.
+      # gateway + nginx del host = 2 saltos de proxy de confianza (IP real del cliente).
+      TRUST_PROXY_HOPS: "2"
+      SESSION_RETENTION_DAYS: ${SESSION_RETENTION_DAYS:-7}
+      # Bloqueados en código con NODE_ENV=production; se fijan además aquí.
+      AUTH_DEV_LOGIN: "false"
+      AUTH_MICROSOFT_SIMULATE: "false"
+      SEED_DEMO_USERS: "false"
+      RUN_SEED: ${RUN_SEED:-false}
+      PRISMA_ACCEPT_DATA_LOSS: "false"
+    networks: [data, app]
+    deploy: { resources: { limits: { memory: 512m, cpus: "1" } } }
+    healthcheck:
+      # Readiness real: consulta a SQL Server (y volumen de imágenes en ticket).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3001/health/ready"]
+      <<: *node-health
+
+  catalog-service:
+    build: { context: ../../catalog-service, dockerfile: Dockerfile.mssql }
+    image: servicedesk/catalog-service:${SERVICEDESK_VERSION:-local}
+    <<: *hardening
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      mssql: { condition: service_healthy }
+      mssql-init: { condition: service_completed_successfully }
+    environment:
+      NODE_ENV: production
+      PORT: 3002
+      DATABASE_URL: sqlserver://mssql:1433;database=${CATALOG_DB_NAME:-catalog_db};user=${CATALOG_DB_USER:-catalog_user};password=${CATALOG_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET}
+      # Fase R: validación de sesión (logout/revocación) contra auth-service.
+      AUTH_SERVICE_URL: http://auth-service:3001
+      AUTH_INTROSPECTION: "true"
+      RUN_SEED: ${RUN_SEED:-false}
+      PRISMA_ACCEPT_DATA_LOSS: "false"
+    networks: [data, app]
+    deploy: { resources: { limits: { memory: 512m, cpus: "1" } } }
+    healthcheck:
+      # Readiness real: consulta a SQL Server (y volumen de imágenes en ticket).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3002/health/ready"]
+      <<: *node-health
+
+  ticket-service:
+    build: { context: ../../ticket-service, dockerfile: Dockerfile.mssql }
+    image: servicedesk/ticket-service:${SERVICEDESK_VERSION:-local}
+    <<: *hardening
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      mssql: { condition: service_healthy }
+      mssql-init: { condition: service_completed_successfully }
+      catalog-service: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --dns-result-order=ipv4first
+      PORT: 3003
+      DATABASE_URL: sqlserver://mssql:1433;database=${TICKET_DB_NAME:-ticket_db};user=${TICKET_DB_USER:-ticket_user};password=${TICKET_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET}
+      CATALOG_SERVICE_URL: http://catalog-service:3002
+      AUTH_SERVICE_URL: http://auth-service:3001
+      AUTH_INTROSPECTION: "true"
+      FRONTEND_URL: ${PUBLIC_SCHEME:-https}://${PUBLIC_DOMAIN}
+      UPLOAD_DIR: /app/uploads
+      EMAIL_NOTIFICATIONS_ENABLED: ${EMAIL_NOTIFICATIONS_ENABLED:-true}
+      EMAIL_SEND_MODE: ${EMAIL_SEND_MODE:-log}
+      SMTP_FROM: ${SMTP_FROM:-ServiceDesk UTA <no-reply@uta.edu.ec>}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      STORAGE_MODE: ${STORAGE_MODE:-local}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      CLOUDINARY_FOLDER: ${CLOUDINARY_FOLDER:-servicedesk-uta}
+      FCM_MODE: ${FCM_MODE:-off}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_CLIENT_EMAIL: ${FCM_CLIENT_EMAIL:-}
+      FCM_PRIVATE_KEY: ${FCM_PRIVATE_KEY:-}
+      RUN_SEED: ${RUN_SEED:-false}
+      PRISMA_ACCEPT_DATA_LOSS: "false"
+    volumes:
+      - ticket-uploads:/app/uploads
+    networks: [data, app]
+    deploy: { resources: { limits: { memory: 512m, cpus: "1" } } }
+    healthcheck:
+      # Readiness real: consulta a SQL Server (y volumen de imágenes en ticket).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3003/health/ready"]
+      <<: *node-health
+
+  api-gateway:
+    build: { context: ../../api-gateway, dockerfile: Dockerfile }
+    image: servicedesk/api-gateway:${SERVICEDESK_VERSION:-local}
+    <<: *hardening
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      auth-service: { condition: service_healthy }
+      catalog-service: { condition: service_healthy }
+      ticket-service: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      AUTH_SERVICE_URL: http://auth-service:3001
+      CATALOG_SERVICE_URL: http://catalog-service:3002
+      TICKET_SERVICE_URL: http://ticket-service:3003
+      FRONTEND_URL: ${PUBLIC_SCHEME:-https}://${PUBLIC_DOMAIN}
+    ports:
+      # SOLO loopback: Docker se salta UFW, así que nunca publicar en 0.0.0.0.
+      - "127.0.0.1:${GATEWAY_BIND_PORT:-8080}:8080"
+    networks: [app, edge]
+    deploy: { resources: { limits: { memory: 256m, cpus: "0.5" } } }
+    healthcheck:
+      # Readiness: los 3 microservicios listos (cada uno con su base de datos).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${PUBLIC_SCHEME:-https}://${PUBLIC_DOMAIN}
+    image: servicedesk/frontend:${SERVICEDESK_VERSION:-local}
+    <<: *hardening
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      api-gateway: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:${FRONTEND_BIND_PORT:-3000}:80"
+    networks: [edge]
+    deploy: { resources: { limits: { memory: 128m, cpus: "0.5" } } }
+    healthcheck:
+      # 127.0.0.1 (no "localhost"): evita el falso unhealthy IPv6 del VPS anterior.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

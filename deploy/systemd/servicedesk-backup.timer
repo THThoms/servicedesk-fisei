@@ -1,0 +1,13 @@
+# ServiceDesk UTA — programa el backup diario a las 03:15 (hora del servidor).
+# Persistent=true: si el servidor estaba apagado, se ejecuta al arrancar.
+[Unit]
+Description=ServiceDesk UTA - Timer de backup diario
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=servicedesk-backup.service
+
+[Install]
+WantedBy=timers.target

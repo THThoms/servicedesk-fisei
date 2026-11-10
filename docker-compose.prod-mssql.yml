@@ -1,0 +1,272 @@
+version: "3.9"
+
+# =============================================================================
+# ServiceDesk UTA — COMPOSE PRODUCTIVO SQL SERVER (Sprint F)
+#
+# Este compose es el nuevo estándar de producción. Sustituye a docker-compose.yml
+# cuando el switch VPS PG → MSSQL se ejecute. Hasta entonces convive con el
+# compose PostgreSQL, que se mantiene como rollback durante el periodo de
+# estabilidad (mínimo 7 días — ver docs/mssql/RETIRO_POSTGRESQL.md).
+#
+# Diferencias respecto a docker-compose.yml (PG):
+#   · Motor de BD: SQL Server 2022 (mcr.microsoft.com/mssql/server:2022-latest)
+#   · No hay `postgres` service; en su lugar `mssql` con volumen /var/opt/mssql.
+#   · Cada servicio Node se construye con Dockerfile.mssql (schema.mssql.prisma).
+#   · DATABASE_URL usa el DSN Prisma sqlserver://
+#
+# Uso (en el VPS, después del switch):
+#   docker compose -f docker-compose.prod-mssql.yml --env-file .env up -d
+#
+# NO se recomienda arrancar este compose al mismo tiempo que docker-compose.yml
+# porque comparten nombres de imagen (sobrescribe la imagen construida). Usar
+# en secuencia según el plan de switch.
+# =============================================================================
+
+networks:
+  servicedesk-net:
+    driver: bridge
+
+volumes:
+  mssql-data:
+  mssql-log:
+  mssql-secrets:
+  ticket-uploads:
+
+services:
+  # ---------------------------------------------------------------------------
+  # SQL Server 2022 — motor único de base de datos en producción.
+  # 3 bases aisladas (auth_db, catalog_db, ticket_db) con logins por servicio.
+  # ---------------------------------------------------------------------------
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sd-mssql
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      MSSQL_PID: "Developer"
+      MSSQL_COLLATION: "SQL_Latin1_General_CP1_CI_AS"
+    volumes:
+      - mssql-data:/var/opt/mssql/data
+      - mssql-log:/var/opt/mssql/log
+      - mssql-secrets:/var/opt/mssql/secrets
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa
+          -P "$$MSSQL_SA_PASSWORD" -C -l 3 -Q "SELECT 1" > /dev/null || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # mssql-init: crea las 3 bases + logins por servicio (idempotente).
+  # ---------------------------------------------------------------------------
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sd-mssql-init
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      AUTH_DB_NAME: ${AUTH_DB_NAME}
+      AUTH_DB_USER: ${AUTH_DB_USER}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD}
+      CATALOG_DB_NAME: ${CATALOG_DB_NAME}
+      CATALOG_DB_USER: ${CATALOG_DB_USER}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD}
+      TICKET_DB_NAME: ${TICKET_DB_NAME}
+      TICKET_DB_USER: ${TICKET_DB_USER}
+      TICKET_DB_PASSWORD: ${TICKET_DB_PASSWORD}
+    volumes:
+      - ./scripts/init-mssql-lab.sql:/init/init-mssql-lab.sql:ro
+      - ./scripts/init-mssql-lab.sh:/init/init-mssql-lab.sh:ro
+    networks:
+      - servicedesk-net
+    entrypoint: ["/bin/bash", "/init/init-mssql-lab.sh"]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # auth-service — build con Dockerfile.mssql, apunta a mssql:1433/auth_db.
+  # ---------------------------------------------------------------------------
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile.mssql
+    image: servicedesk-microservices-auth-service-mssql
+    container_name: sd-auth
+    restart: unless-stopped
+    depends_on:
+      mssql:
+        condition: service_healthy
+      mssql-init:
+        condition: service_completed_successfully
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --dns-result-order=ipv4first
+      PORT: 3001
+      DATABASE_URL: sqlserver://mssql:1433;database=${AUTH_DB_NAME};user=${AUTH_DB_USER};password=${AUTH_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET}
+      MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI}
+      ALLOWED_DOMAIN: ${ALLOWED_DOMAIN}
+      ADMIN_EMAILS: ${ADMIN_EMAILS}
+      AUTH_DEV_LOGIN: ${AUTH_DEV_LOGIN}
+      FRONTEND_URL: ${FRONTEND_URL}
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # catalog-service
+  # ---------------------------------------------------------------------------
+  catalog-service:
+    build:
+      context: ./catalog-service
+      dockerfile: Dockerfile.mssql
+    image: servicedesk-microservices-catalog-service-mssql
+    container_name: sd-catalog
+    restart: unless-stopped
+    depends_on:
+      mssql:
+        condition: service_healthy
+      mssql-init:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 3002
+      DATABASE_URL: sqlserver://mssql:1433;database=${CATALOG_DB_NAME};user=${CATALOG_DB_USER};password=${CATALOG_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET}
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # ticket-service
+  # ---------------------------------------------------------------------------
+  ticket-service:
+    build:
+      context: ./ticket-service
+      dockerfile: Dockerfile.mssql
+    image: servicedesk-microservices-ticket-service-mssql
+    container_name: sd-ticket
+    restart: unless-stopped
+    depends_on:
+      mssql:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3003
+      DATABASE_URL: sqlserver://mssql:1433;database=${TICKET_DB_NAME};user=${TICKET_DB_USER};password=${TICKET_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      AUTH_DATABASE_URL: sqlserver://mssql:1433;database=${AUTH_DB_NAME};user=${AUTH_DB_USER};password=${AUTH_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      CATALOG_DATABASE_URL: sqlserver://mssql:1433;database=${CATALOG_DB_NAME};user=${CATALOG_DB_USER};password=${CATALOG_DB_PASSWORD};encrypt=true;trustServerCertificate=true
+      JWT_SECRET: ${JWT_SECRET}
+      CATALOG_SERVICE_URL: ${CATALOG_SERVICE_URL}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+      EMAIL_NOTIFICATIONS_ENABLED: ${EMAIL_NOTIFICATIONS_ENABLED:-true}
+      EMAIL_SEND_MODE: ${EMAIL_SEND_MODE:-log}
+      SMTP_FROM: ${SMTP_FROM:-ServiceDesk UTA <no-reply@uta.edu.ec>}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      STORAGE_MODE: ${STORAGE_MODE:-local}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      CLOUDINARY_FOLDER: ${CLOUDINARY_FOLDER:-servicedesk-uta}
+      FCM_MODE: ${FCM_MODE:-off}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_CLIENT_EMAIL: ${FCM_CLIENT_EMAIL:-}
+      FCM_PRIVATE_KEY: ${FCM_PRIVATE_KEY:-}
+    volumes:
+      - ticket-uploads:/app/uploads
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # API Gateway
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    image: servicedesk-microservices-api-gateway
+    container_name: sd-gateway
+    restart: unless-stopped
+    depends_on:
+      auth-service:
+        condition: service_started
+      catalog-service:
+        condition: service_started
+      ticket-service:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: ${API_GATEWAY_PORT}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      CATALOG_SERVICE_URL: ${CATALOG_SERVICE_URL}
+      TICKET_SERVICE_URL: ${TICKET_SERVICE_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+    ports:
+      - "${API_GATEWAY_PORT}:8080"
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Frontend (nginx + Vite build)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+    image: servicedesk-microservices-frontend
+    container_name: sd-frontend
+    restart: unless-stopped
+    depends_on:
+      - api-gateway
+    ports:
+      - "${FRONTEND_PORT}:80"
+    networks:
+      - servicedesk-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
